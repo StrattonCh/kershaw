@@ -1,0 +1,234 @@
+---
+title: "Hierarchical Kershaw model using Polya-gamma data augmentation"
+output: pdf_document
+header-includes:
+  - \usepackage{setspace}\doublespacing
+  - \usepackage{mdframed}
+bibliography: biblio.bib
+csl: biometrics.csl
+---
+
+```{r, include = F}
+set.seed(06112019)
+packs <- c('tidyverse', 'lubridate', 'ggthemr')
+lapply(packs, require, character.only = T)
+load("scraping and cleaning/kershaw_clean.Rdata")
+
+kershaw.full <- kershaw
+
+my.prog <- function(print = .05*num.mcmc, begin, num.mcmc, i){
+  if(i %% print == 0){
+    cat("\014")
+    runtime <- (Sys.time() - begin)
+    percent <- round(i/num.mcmc * 100, 2)
+    message <- paste('\nIteration ', i, ' of ', num.mcmc, '; ', percent, '% done. Current runtime of ', round(runtime, 2), ' ', attr(runtime, 'units'), '.\n', sep = "")
+    cat(message)
+    txtProgressBar(min = 2, max = num.mcmc, initial = i, style = 3)
+  }
+}
+```
+
+\setlength\parindent{0pt}
+\pagenumbering{gobble}
+
+\newcommand{\bfx}{\mbox{\boldmath $x$}}
+\newcommand{\bfX}{\mbox{\boldmath $X$}}
+\newcommand{\bfb}{\mbox{\boldmath $\beta$}}
+\newcommand{\bfy}{\mbox{\boldmath $y$}}
+\newcommand{\bfw}{\mbox{\boldmath $\omega$}}
+\newcommand{\bfW}{\mbox{\boldmath $\Omega$}}
+\newcommand{\bfz}{\mbox{\boldmath $z$}}
+\newcommand{\bfZ}{\mbox{\boldmath $Z$}}
+\newcommand{\bfmu}{\mbox{\boldmath $\mu$}}
+\newcommand{\bfS}{\mbox{\boldmath $\Sigma$}}
+\newcommand{\bfL}{\mbox{\boldmath $\Lambda$}}
+\newcommand{\bfm}{\mbox{\boldmath $m$}}
+\newcommand{\bfV}{\mbox{\boldmath $V$}}
+\newcommand{\bfc}{\mbox{\boldmath $c$}}
+\newcommand{\bft}{\mbox{\boldmath $\theta$}}
+
+\normalsize
+\doublespacing
+\section{1 Introduction}
+
+The goal of this document is to outline the logic used to create the pitch prediction model for Clayton Kershaw. In this document, we cover an exploratory data analysis, describe the model fit to the data, and conclude the results of that model and a discussion of those results. 
+
+\section{2 Exploratory data analysis}
+
+In this section, we visualize the distribution of pitch type across a number of interesting predictors. 
+
+```{r, echo = F, warning = F, message = F}
+kershaw.full <- kershaw.full %>%
+  dplyr::mutate(date = sapply(strsplit(gameday_link, '_'), FUN = function(x) paste(x[2:4], collapse = '-')) %>%
+                  ymd(.)) %>%
+  mutate(year = year(date),
+         month = month(date),
+         day = day(date)) %>%
+  mutate(count = factor(count))
+
+kershaw.train <- sample_frac(kershaw.full, .7)
+kershaw.test <- anti_join(kershaw.full, kershaw.train)
+
+ggthemr::ggthemr('dust', layout = 'scientific')
+ggplot(kershaw.full) +
+  geom_bar(aes(x = pitch_type, y = ..count.. / sapply(PANEL, FUN=function(x) sum(count[PANEL == x])))) +
+  facet_wrap(~ year) + 
+  labs(title = 'Relative frequencies of each pitch type across year',
+       y = 'relative frequencies',
+       x = 'pitch type')
+
+kershaw.full %>%
+  filter(year == 2008) %>%
+  ggplot() + 
+    geom_bar(aes(x = pitch_type, y = ..count.. / sapply(PANEL, FUN=function(x) sum(count[PANEL == x])))) +
+    facet_wrap(~ prev_pitch) + 
+    labs(title = 'Relative frequencies of each pitch type across previous pitch type',
+         y = 'relative frequencies',
+         x = 'pitch type')
+```
+
+\section{3 Model}
+
+In this section, we discuss the model and sampler.
+
+```{r, cache = T, eval = F, echo = F}
+# response, size, and design
+N <- nrow(kershaw.train)
+size <- rep(1, N)
+X <- model.matrix(pitch_type ~ count, kershaw.train)
+mf <- model.frame(formula = pitch_type ~ count, data = kershaw.train)
+y <- dummies::dummy(model.response(mf))
+colnames(y) <- levels(model.response(mf))
+J <- ncol(y)
+
+# precompute kappa
+kappa <- y - size/2 
+
+# setup sampler and priors
+num.mcmc <- 1000
+p <- ncol(X)
+beta.mcmc <- array(0, dim = c(num.mcmc, p, J))
+dimnames(beta.mcmc)[[2]] <- colnames(X)
+dimnames(beta.mcmc)[[3]] <- levels(model.response(mf))
+
+mu0 <- matrix(0, nrow = p, ncol = 1)
+Sigma0.inv <- solve(9*diag(p))
+prior.prod <- Sigma0.inv %*% mu0
+
+# initialize
+beta.mcmc[1,,] <- matrix(rnorm(p*J), ncol = 1)
+
+# sampler
+for(i in 2:num.mcmc){
+  for(j in 1:(J-1)){
+    # calculate matrix of linear predictors
+    linpred <- X %*% beta.mcmc[i-1,,]
+    
+    # update latent omegas
+    C <- log(rowSums(exp(linpred[,-j])))
+    eta <- linpred[,j] - C
+    omega <- BayesLogit::rpg(N, size, eta)
+    Omega <- diag(omega)
+    
+    # update beta
+    V <- solve(t(X) %*% Omega %*% X + Sigma0.inv)
+    m <- V %*% (t(X) %*% (kappa[,j] + Omega %*% C) + prior.prod)
+    beta.mcmc[i,,j] <- matrix(mvtnorm::rmvnorm(1, m, V), ncol = 1)
+  }
+}
+colMeans(beta.mcmc)
+```
+
+
+\subsection{3.1 Hierarchical multinomial model}
+
+The model we fit to these data is described below. 
+\begin{equation*}
+\begin{split}
+\boldsymbol{y}_1, ... \boldsymbol{y}_{n_m} | \boldsymbol{\pi}_{im} &\sim \text{multnomial}(1,\boldsymbol{\pi}_{im}), \hspace{5mm}  \pi_{ijm} = \frac{e^{\boldsymbol{x}_i\boldsymbol{\beta}_{jm}}}{\sum_{k=1}^{J} e^{\boldsymbol{x}_i\boldsymbol{\beta}_{km}}} \\
+\boldsymbol{\beta}_1, ..., \boldsymbol{\beta}_{M}|\boldsymbol{\psi} &\sim \mathcal{N}(\boldsymbol{\bft}, \boldsymbol{\Sigma}), \hspace{23mm} \boldsymbol{\psi} = \{\boldsymbol{\bft}, \boldsymbol{\Sigma}\}
+\end{split}
+\end{equation*}
+where $i$ indexes the observation ($i = 1, 2, \dots, n_m$), $j$ the level of the response ($j = 1, 2, \dots, J$), and $m$ indexes the member of the hierarchy ($m = 1, 2, \dots, M$). To draw from the joint posterior distribution of $\{\bfb, \bfmu, \bfS\}$, we first sample the hyper-parameters with Gibbs draws using the full-conditional distributions derived on page 199 of [@hoff2009]. To sample the regression coefficients, we make use of the Polya-gamma data augmentation strategy described by [@polson2013], the details of which are provided in appendix S1. This model requires prior distributions on the hyper-parameters. The following are semi-conjugate priors that allow for a Gibbs sampler.
+\begin{equation*}
+\begin{split}
+\boldsymbol{\bft} &\sim \mathcal{N}(\boldsymbol{\mu}_0, \boldsymbol{\Lambda}_0) \\
+\boldsymbol{\Sigma} &\sim \text{inverse-Wishart}(\eta_0, \boldsymbol{S}_0 ) \\
+\end{split}
+\end{equation*}
+In general, we chose $\boldsymbol{\mu}_0 = \boldsymbol{0}$, $\boldsymbol{\Lambda}_0 = 100\boldsymbol{I}_{p}$, $\eta_0 = p$ and $\boldsymbol{S}_0 = \boldsymbol{I}_{p}$, where $p$ is the number of regression coefficients being estimated, which results in weakly informative priors. These methods result in the following Gibbs sampler. 
+
+\textbf{CLEAN UP NOTATION}
+\vspace{5mm}
+\begin{mdframed}
+{\sf for j in 1:J}
+\begin{enumerate}
+\item[-] sample $\bft | \bfS, \bfb \sim \mathcal{N}(\bfmu_n, \bfL_n)$ \\ where $\boldsymbol{\mu}_n = \boldsymbol{\Lambda}_n \left(\boldsymbol{\Lambda}_0^{-1} \boldsymbol{\mu}_0 + \boldsymbol{\Sigma}^{-1} \sum_{k=1}^{m}\boldsymbol{\beta}_k\right)$ and $\boldsymbol{\Lambda}_n = \left(\boldsymbol{\Lambda}_0^{-1} + m\boldsymbol{\Sigma}^{-1}\right)^{-1}$
+\item[-] sample $\bfS^{-1} | \bft, \bfb \sim \text{Wishart}(\eta_0 + m, \boldsymbol{S}_0 + \boldsymbol{S}_{\bft})$ \\ where $\boldsymbol{S}_{\bft} = \sum_{k = 1}^{m} (\bfb_k - \bft)(\bfb_k - \bft)'$
+\end{enumerate}
+{\sf for m in 1:M} \\
+{\sf for j in 1:J}
+\begin{enumerate}
+\item[-] sample $\bfb^{m}_j | \bft_j, \bfS_j, \bfz_j \sim \mathcal{N}(\boldsymbol{a}, \bfV)$ \\ where $\bfV_j = \left(\bfX'\bfW_j\bfX + \bfS_0^{-1}\right)^{-1}$, $\bfm = \bfV(\bfX'(\boldsymbol{\kappa_j + \bfW_j\boldsymbol{c}_j}) + \bfS_0^{-1}\bfmu_0)$, $\eta_{ij} = \bfx_i'\bfb_j - c_{ij}$, and $c_{ij} = \text{log}\left(\sum_{k \neq j} \text{exp}(\bfx_i'\bfb_k) \right)$.
+\end{enumerate}
+\end{mdframed}
+
+\section{4 Results}
+
+```{r}
+mods <- c('models/mod1.Rdata', 'models/mod2.Rdata', 'models/mod3.Rdata', 'models/mod4.Rdata', 'models/mod5.Rdata')
+lapply(mods, load, .GlobalEnv)
+```
+
+\section{5 Discussion}
+
+\newpage
+\section{Appendix S1: Multinomial Logistic Regression Derivations}
+
+Consider the multinomial regression model using the multinomial logit (softmax) link function. 
+\[
+\begin{split}
+\boldsymbol{y}_{i} | \boldsymbol{\pi}_{i} &\sim \text{multinomial}\left(1, \boldsymbol{\pi}_{i}\right) \\
+\pi_{ij} &= \frac{\text{exp}(\bfx_i'\bfb_{j})}{\sum_{k=1}^J \text{exp}(\bfx_i'\bfb_k)} 
+\end{split}
+\]
+
+where $\boldsymbol{y}_i$ represents the vector of responses for the multinomial trial on observation $i$ and $\boldsymbol{\pi}_i$ represents the vector of probabilities of success for each level of the multinomial trial, and $\pi_{ij}$ represents the probability of success for level $j$ on trial $i$. 
+
+To sample the joint posterior distribution of $\bfb$, we again make use of the Polya-gamma data augmentation strategy described by [@polson2013]. To do so, we require the likelihood contribution of the regression coefficients associated with one level of the response conditional on the others. [@holmes2006] showed that this contribution is given by the following:
+\[
+\begin{split}
+\ell(\bfb_j | \bfb_{-j}, \bfy) \propto \prod_{i=1}^N \left(\frac{e^{\eta_{ij}}}{1+e^{\eta_{ij}}}\right)^{y_{ij}} \left(\frac{1}{1+e^{\eta_{ij}}}\right)^{n_i - y_{ij}} = \prod_{i=1}^N \frac{\left(e^{\eta_{ij}}\right)^{y_{ij}}}{\left(1+e^{\eta_{ij}}\right)^{n_i}}
+\end{split}
+\]
+where $\eta_{ij} = \bfx_i'\bfb_j - c_{ij}$ and $c_{ij} = \text{log}\left(\sum_{k \neq j} \text{exp}(\bfx_i'\bfb_k) \right)$. Thus, it is clear that conditional on the regression coefficients associated with the other levels of the response, the likelihood contribution of $\bfb_j$ has the same form as that of the standard logistic regression model. Therefore, we can replicate the samplers described above, looping over $J - 1$ (for identifiability) levels of the response. 
+
+If we let $z_{ij} = \frac{1}{\omega_{ij}}(y_{ij} - \frac{n_{i}}{2})$, then $z_{ij} | \bfb, \omega_{ij} \sim N(\eta_{ij}, \frac{1}{\omega_{ij}})$. We now derive the full conditional posterior distribution of $\bfb_j$, again assuming a $\mathcal{N}(\bfmu_0, \bfS_0)$ prior on $\bfb_j$.
+\begin{equation*}
+\begin{split}
+p(\bfb_j | \bfz, \bfW_j) &\propto p(\bfz | \bfb_j, \bfW_j) \cdot p(\bfb_j) \\
+&\propto \exp\left\{-\frac{1}{2}\left(\bfz_j - (\bfX\bfb_j - \bfc_j) \right)' \bfW_j \left(\bfz_j - (\bfX\bfb_j - \bfc_j) \right) \right\} \exp\left\{-\frac{1}{2}\left(\bfb_j - \bfmu_0 \right)' \bfS_0^{-1} \left(\bfb_j - \bfmu_0 \right) \right\} \\
+&\propto \text{exp}\left\{-\frac{1}{2}\left(- 2\bfb_j'\bfX'\bfW_j\bfz_j - 2\bfb_j'\bfX'\bfW_j\bfc_j + \bfb_j'\bfX'\bfW_j\bfX\bfb_j \right) \right\} \text{exp}\left\{-\frac{1}{2}\left(\bfb_j'\bfS_0^{-1}\bfb_j - 2\bfb_j'\bfS_0^{-1}\bfmu_0 \right) \right\} \\
+&= \text{exp}\left\{-\frac{1}{2}\left(- 2\bfb_j'\bfX'\bfW_j(\bfz_j + \bfc_j) + \bfb_j'\bfX'\bfW_j\bfX\bfb_j \right) \right\} \text{exp}\left\{-\frac{1}{2}\left(\bfb_j'\bfS_0^{-1}\bfb_j - 2\bfb_j'\bfS_0^{-1}\bfmu_0 \right) \right\} \\
+&= \text{exp}\left\{-\frac{1}{2}\left(- 2\bfb_j'\left(\bfX'\bfW_j(\bfz_j + \bfc_j) + \bfS_0^{-1}\bfmu_0 \right) + \bfb_j'\left(\bfX'\bfW_j\bfX + \bfS_0^{-1}\right) \bfb_j\right) \right\} \\
+\end{split}
+\end{equation*}
+
+Consequently, we have the following full conditional posterior distributions:
+\[
+\begin{split}
+\bfb_j | \bfb_{-j}, \bfz_j, \bfW_j &\sim \mathcal{N}(\bfm_j, \bfV_j) \\
+\omega_{ij} | \bfb, \bfZ &\sim \text{PG}(n_{i}, \eta_{ij})
+\end{split}
+\]
+where $\bfV_j = \left(\bfX'\bfW_j\bfX + \bfS_0^{-1}\right)^{-1}$, $\bfm = \bfV(\bfX'(\boldsymbol{\kappa_j + \bfW_j\boldsymbol{c}_j}) + \bfS_0^{-1}\bfmu_0)$, $\eta_{ij} = \bfx_i'\bfb_j - c_{ij}$, and $c_{ij} = \text{log}\left(\sum_{k \neq j} \text{exp}(\bfx_i'\bfb_k) \right)$.
+
+
+\newpage
+\singlespacing
+\section{References}
+\setlength{\parindent}{-0.2in}
+\setlength{\leftskip}{0.2in}
+\setlength{\parskip}{8pt}
+
+\noindent \bibliography{biblio}

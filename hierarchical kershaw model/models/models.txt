@@ -1,0 +1,15 @@
+Fitted Models
+
+- model 0: pitch frequencies
+- model 1: as.formula(pitch_type ~ count)
+- model 2: as.formula(pitch_type ~ count + prev_pitch)
+- model 3: as.formula(pitch_type ~ count + prev_pitch + pitch_count)
+- model 4: as.formula(pitch_type ~ count + prev_pitch + bat_order)
+- model 5: as.formula(pitch_type ~ count + prev_pitch + stand)
+- model 6: as.formula(pitch_type ~ count + prev_pitch + on.1b + on.2b + on.3b)
+
+
+# meeting notes
+
+- add pitch count, on-base X
+- fix prior X
