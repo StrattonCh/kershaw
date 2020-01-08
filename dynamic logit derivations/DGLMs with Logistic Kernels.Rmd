@@ -1,0 +1,896 @@
+---
+title: "Dynamic generalized linear model derivations using Polya-gamma data augmentation"
+output: pdf_document
+header-includes:
+  - \usepackage{setspace}\doublespacing
+  - \usepackage{mdframed}
+bibliography: biblio.bib
+csl: biometrics.csl
+---
+
+```{r, include = F}
+packs <- c('bayes', 'ggthemr', 'tidyverse', 'dplyr')
+lapply(packs, require, character.only = T)
+
+knitr::opts_chunk$set(fig.dim = c(8,6))
+set.seed(04302019)
+
+# functions
+## ffbs function
+ffbs <- function(y, X, mu0, phi0, tau2, sigma2){
+  # setup storage
+  y <- matrix(y, ncol = 1)
+  time.pts <- nrow(y)
+  p <- ncol(X)
+  beta <- matrix(0, time.pts, p)
+  m.mcmc <- matrix(0, time.pts, p)
+  C.mcmc <- matrix(0, time.pts, p^2)
+
+  if(length(sigma2) == 1) sigma2 <- rep(sigma2, time.pts)
+
+  # forward filter
+  m.t <- matrix(mu0, time.pts, p)
+  C.t <- matrix(0, time.pts, p^2);C.t[1,] <- c(phi0*diag(p))
+  a.t <- matrix(0, time.pts, p)
+  R.t <- matrix(0, time.pts, p^2)
+  # G.t <- diag(p)
+
+  W.t <- tau2 * diag(p)
+  for(t in 2:time.pts){
+    F.t <- t(X[t,])
+
+    Cmat.t <- matrix(C.t[t-1,], p, p)
+
+    # a.t[t,] <- G.t %*% m.t[t-1, ]
+    a.t[t,] <- m.t[t-1, ]
+    # R.t[t,] <- c(G.t %*% Cmat.t %*% t(G.t) + W.t)
+    R.t[t,] <- c(Cmat.t + W.t)
+
+    Rmat.t <- matrix(R.t[t,], p, p)
+
+    f.t <- F.t %*% a.t[t,]
+    Q.t <- F.t %*% Rmat.t %*% t(F.t) + sigma2[t]
+
+    Qinv.t <- solve(Q.t)
+
+    m.t[t,] <- a.t[t,] + Rmat.t %*% t(F.t) %*% Qinv.t %*% (y[t,] - f.t)
+    C.t[t,] <- c(Rmat.t - Rmat.t %*% t(F.t) %*% Qinv.t %*% F.t %*% Rmat.t)
+    m.mcmc[t,] <- m.t[t,]
+    C.mcmc[t,] <- C.t[t,]
+  }
+
+  # backwards sample
+  beta[time.pts,] <- mvtnorm::rmvnorm(1, m.t[time.pts,], sigma = matrix(C.t[time.pts,], p, p))
+  for(t in 1:(time.pts - 1)){
+    ndx <- time.pts - t
+    h.t <- m.t[ndx, ] + matrix(C.t[ndx,], p, p) %*% solve(matrix(R.t[ndx+1,], p, p)) %*% (beta[ndx+1,] - a.t[ndx+1,])
+    H.t <- matrix(C.t[ndx,], p, p) - matrix(C.t[ndx,], p, p) %*% solve(matrix(R.t[ndx+1,], p, p)) %*% matrix(C.t[ndx,], p, p)
+    beta[ndx,] <- mvtnorm::rmvnorm(1, h.t, sigma = round(H.t, 5))
+  }
+
+  out <- list(beta = beta, m = m.mcmc, C = C.mcmc)
+  return(out)
+}
+
+## progress function
+my.prog <- function(print = .05*num.mcmc, begin, num.mcmc, i){
+  if(i %% print == 0){
+    cat("\014")
+    runtime <- (Sys.time() - begin)
+    percent <- round(i/num.mcmc * 100, 2)
+    message <- paste('\nIteration ', i, ' of ', num.mcmc, '; ', percent, '% done. Current runtime of ', round(runtime, 2), ' ', attr(runtime, 'units'), '.\n', sep = "")
+    cat(message)
+    txtProgressBar(min = 2, max = num.mcmc, initial = i, style = 3)
+  }
+}
+```
+
+\setlength\parindent{0pt}
+\pagenumbering{gobble}
+
+\newcommand{\bfx}{\mbox{\boldmath $x$}}
+\newcommand{\bfX}{\mbox{\boldmath $X$}}
+\newcommand{\bfb}{\mbox{\boldmath $\beta$}}
+\newcommand{\bfy}{\mbox{\boldmath $y$}}
+\newcommand{\bfw}{\mbox{\boldmath $\omega$}}
+\newcommand{\bfW}{\mbox{\boldmath $\Omega$}}
+\newcommand{\bfz}{\mbox{\boldmath $z$}}
+\newcommand{\bfZ}{\mbox{\boldmath $Z$}}
+\newcommand{\bfmu}{\mbox{\boldmath $\mu$}}
+\newcommand{\bfS}{\mbox{\boldmath $\Sigma$}}
+\newcommand{\bfm}{\mbox{\boldmath $m$}}
+\newcommand{\bfV}{\mbox{\boldmath $V$}}
+\newcommand{\bfc}{\mbox{\boldmath $c$}}
+
+\normalsize
+
+\section{1 Logistic regression}
+
+Consider the standard logistic regression model. 
+\[
+\begin{split}
+y_i &\sim \text{binomial}(n_i, \pi_i) \\
+\pi_i &= \frac{\exp(\bfx_i'\bfb)}{1 + \exp(\bfx_i'\bfb)}
+\end{split}
+\]
+
+To sample the joint posterior distribution of $\bfb$, we place multivariate normal priors on $\bfb$ and implement the Polya-gamma data augmentation strategy described by [@polson2013], which allows for Gibbs draws. The details are provided below. 
+
+\subsection{1.1 Derivations}
+
+The full conditional posterior distribution of the regression coefficients is proportional to the following:
+\begin{equation}
+\begin{split}
+p(\bfb | \bfy) &\propto p(\bfb)\prod_{i=1}^n p(y_i | \bfb) \\
+&\propto p(\bfb)\prod_{i=1}^n \pi_i^{y_i} (1 - \pi_i)^{n_i - y_i}, \hspace{5mm} \pi_i = \frac{\exp(\bfx_i'\bfb)}{1 + \exp(\bfx_i'\bfb)}
+\end{split}
+\end{equation}
+This can be rewritten as the following:
+\begin{equation}
+\begin{split}
+p(\bfb | \bfy) &\propto p(\bfb)\prod_{i=1}^n \left(\frac{\exp(\bfx_i'\bfb)}{1 + \exp(\bfx_i'\bfb)}\right)^{y_i} \left(1 - \frac{\exp(\bfx_i'\bfb)}{1 + \exp(\bfx_i'\bfb)}\right)^{n_i - y_i} \\
+&= p(\bfb)\prod_{i=1}^n \frac{\exp(\bfx_i'\bfb)^{y_i}}{(1 + \exp(\bfx_i'\bfb))^{n_i}}
+\end{split}
+\end{equation}
+Theorem one of [@polson2013] states that for $b > 0$,
+\[
+\frac{(e^\psi)^a}{(1 + e^\psi)^b} = 2^{-b}e^{\kappa\psi}\int_0^\infty e^{-\omega\psi^2/2} p(\omega)d\omega,
+\]
+for $\kappa = a - b/2$ and $\omega \sim \text{PG}(b, 0)$, where PG denotes the Polya-gamma density. Therefore, revisiting (2), conditioning on the Polya-gamma latents, and letting $\psi_i = \bfx_i'\bfb$ we have:
+\begin{equation}
+\begin{split}
+p(\bfb | \bfy, \bfw) &\propto p(\bfb)\prod_{i=1}^n \frac{(e^{\psi_i})^{y_i}}{(1 + e^{\psi_i})^{n_i}} \\
+&= p(\bfb)\prod_{i=1}^n \exp(\kappa_i\psi_i - \omega_i\psi_i^2/2) \\
+&\propto p(\bfb)\prod_{i=1}^n \exp\left(- \frac{\omega_i}{2} \left(z_i - \psi_i\right)^2\right) \\
+&= p(\bfb) \exp\left\{ -\frac{1}{2}(\bfz - \bfX\bfb)' \bfW (\bfz - \bfX\bfb)\right\},
+\end{split}
+\end{equation}
+where $\kappa_i = y_i - \frac{n_i}{2}$, $z_i = \frac{\kappa_i}{\omega_i}$, and $\bfW = \text{diag}(\omega_1, ..., \omega_n)$. From (3), $\bfz$ is conditionally Gaussian. That is,
+\begin{equation}
+\bfz | \bfb, \bfW \sim \mathcal{N}(\bfX\bfb, \bfW^{-1})
+\end{equation}
+Therefore, placing a $\mathcal{N}(\bfmu_0, \bfS_0)$ prior on $\bfb$ results in the following full conditional distribution:
+\begin{equation}
+\begin{split}
+p(\bfb | \bfz, \bfW) &\propto p(\bfz | \bfb, \bfW) \cdot p(\bfb) \\
+&\propto \exp\left\{-\frac{1}{2}\left(\bfz - \bfX\bfb \right)' \bfW \left(\bfz - \bfX\bfb \right) \right\} \exp\left\{-\frac{1}{2}\left(\bfb - \bfmu_0 \right)' \bfS_0^{-1} \left(\bfb - \bfmu_0 \right) \right\} \\
+&= \text{exp}\left\{-\frac{1}{2}\left(\bfz'\bfW\bfz - 2\bfb'\bfX'\bfW\bfz + \bfb'\bfX'\bfW\bfX\bfb \right) \right\} \text{exp}\left\{-\frac{1}{2}\left(\bfb'\bfS_0^{-1}\bfb - 2\bfb'\bfS_0^{-1}\bfmu_0 + \bfmu_0'\bfS_0^{-1}\bfmu_0 \right) \right\} \\
+&\propto \text{exp}\left\{-\frac{1}{2}\left(- 2\bfb'\bfX'\bfW\bfz + \bfb'\bfX'\bfW\bfX\bfb \right) \right\} \text{exp}\left\{-\frac{1}{2}\left(\bfb'\bfS_0^{-1}\bfb - 2\bfb'\bfS_0^{-1}\bfmu_0 \right) \right\} \\
+&= \text{exp}\left\{-\frac{1}{2}\left(- 2\bfb'\bfX'\bfW\bfz + \bfb'\bfX'\bfW\bfX\bfb + \bfb'\bfS_0^{-1}\bfb - 2\bfb'\bfS_0^{-1}\bfmu_0 \right) \right\} \\
+&= \text{exp}\left\{-\frac{1}{2}\left(- 2\bfb'\left(\bfX'\bfW\bfz + \bfS_0^{-1}\bfmu_0 \right) + \bfb'\left(\bfX'\bfW\bfX + \bfS_0^{-1}\right) \bfb\right) \right\} \\
+\end{split}
+\end{equation}
+And now, a quick note on identifying kernels of a multivariate normal distribution. Suppose $\bfb \sim \mathcal{N}(\bfmu, \bfS)$. Then
+\begin{equation}
+\begin{split}
+p(\bfb) &\propto \text{exp}\left\{-\frac{1}{2}(\bfb - \bfmu)'\bfS^{-1}(\bfb - \bfmu) \right\} \\
+&\propto \text{exp}\left\{-\frac{1}{2}\left(\bfb'\bfS^{-1}\bfb - 2\bfb'\bfS^{-1}\bfmu \right) \right\}
+\end{split}
+\end{equation}
+Therefore, based on (6), (5) implies that 
+\begin{equation}
+\bfb | \bfz, \bfW \sim \mathcal{N}(\bfm, \bfV),
+\end{equation}
+where $\bfV = \left(\bfX'\bfW\bfX + \bfS_0^{-1}\right)^{-1}$ and $\bfm = \bfV \left(\bfX'\bfW\bfz + \bfS_0^{-1}\bfmu_0 \right)$. Finally, we note that $\bfW\bfz = \boldsymbol{\kappa}$. 
+
+Finally, [@polson2013] note that the full conditional distribution of $\bfW$ is also in the Polya-gamma family, and given by the following:
+\begin{equation}
+\omega_i | \bfb \sim \text{PG}(n_i, \psi_i)
+\end{equation}
+where $\psi_i = \bfx_i'\bfb$. We omit the derivation here. 
+
+\subsection{1.2 Implementation}
+
+As a motivating example, consider the famed Donner party dataset. The MLEs for an additive model with sex and age are given below. 
+\singlespacing
+```{r}
+data(case2001, package = 'Sleuth3')
+summary(glm(Status ~ Sex + Age, family = 'binomial', data = case2001))
+```
+
+\doublespacing
+
+We now fit this model with a Gibbs sampler using the strategy described above. 
+\singlespacing
+```{r, warning = F, message = F, cache = T, eval = T}
+# response, size, and design
+y <- with(Sleuth3::case2001, as.numeric(Status) - 1) # died = 0, survived = 1
+size <- rep(1, nrow(Sleuth3::case2001))
+n <- nrow(Sleuth3::case2001)
+X <- model.matrix(~ Sex + Age, data = Sleuth3::case2001)
+
+# precompute kappa
+kappa <- y - size/2 
+
+# setup sampler and priors
+num.mcmc <- 10000
+p <- ncol(X)
+beta.mcmc <- matrix(0, num.mcmc, p);colnames(beta.mcmc) <- colnames(X)
+
+mu0 <- matrix(0, nrow = p, ncol = 1)
+Sigma0.inv <- solve(16*diag(p))
+prior.prod <- Sigma0.inv %*% mu0
+
+# initialize
+beta <- matrix(rnorm(p), ncol = 1)
+
+# sampler
+for(i in 2:num.mcmc){
+  # update latent omegas
+  eta <- c(X %*% beta)
+  omega <- BayesLogit::rpg(n, size, eta)
+  Omega <- diag(omega)
+  
+  # update beta
+  V <- solve(t(X) %*% Omega %*% X + Sigma0.inv)
+  m <- V %*% (t(X) %*% kappa + prior.prod)
+  beta <- matrix(mvtnorm::rmvnorm(1, m, V), ncol = 1)
+  
+  # store
+  beta.mcmc[i, ] <- c(beta)
+}
+est <- cbind(
+  colMeans(beta.mcmc),
+  apply(beta.mcmc, 2, sd)
+); colnames(est) <- c('mean', 'sd')
+est
+```
+\doublespacing
+These estimates and standard deviations are consistent with those of the MLEs, which reflects our weakly informative priors. 
+
+\newpage
+
+\section{2 Dynamic logistic regression}
+
+We now allow the regression coefficients to change over time. 
+\[
+\begin{split}
+y_t &\sim \text{binomial}(n_t, \pi_t), \hspace{5mm} \pi_t = \frac{\exp(\bfx_t'\bfb_t)}{1 + \exp(\bfx_t'\bfb_t)} \\
+\bfb_t &= \bfb_{t-1} + \bfV_t, \hspace{12mm} \bfV_t \sim \mathcal{N}(\boldsymbol{0}, \tau^2\boldsymbol{I})
+\end{split}
+\]
+
+\subsection{2.1 Derivations}
+
+Recall from Section 1.1 that if we let $z_t = \frac{1}{\omega_t} (y_t - \frac{n_t}{2})$, then $z_t | \bfb_t, \omega_t \sim N(x_t'\bfb_t, \frac{1}{\omega_t})$. Therefore, to sample from the joint posterior distribution of $\bfb_t$ and $\omega_t$, we implement a FFBS algorithm treating $z_t$ as working responses. The details of this algorithm are presented in [@petris2009], though we provide the general outline here. Our observation and evolution equations are as follows:
+\[
+\begin{split}
+z_t &= x_t'\bfb + w_t, \hspace{8mm} w_t \sim N\left(0, \frac{1}{\omega_t}\right) \\
+\bfb_t &= \bfb_{t-1} + \bfV_t, \hspace{5mm} \bfV_t \sim \mathcal{N}(\boldsymbol{0}, \tau^2\boldsymbol{I})
+\end{split}
+\]
+
+\begin{mdframed}
+To take fully Bayesian draws from the joint posterior distribution, we implement the following Gibbs sampler:
+\begin{itemize}
+\item[1)] sample $\bfb_{1:T} | \cdot$ using a FFBS
+\item[2)] sample $\omega_t | \cdot \sim \text{PG}(n_i, x_t'\bfb_t)$
+\item[3)] sample $\tau | \cdot \sim \text{IG}(a_0 + \frac{T}{2}, b_0 + \frac{1}{2} \sum_{t=1}^T (x_t'\bfb - x_{t-1}\bfb_{t-1})^2)$
+\end{itemize}
+\end{mdframed}
+
+\subsection{2.2 Implementation}
+
+We begin by simulating dynamic logistic data. 
+
+\subsubsection{2.2.1 One observation per time point}
+
+We first consider the case where we observe a single binomial trial per time point. 
+
+\singlespacing
+
+```{r, cache = T, fig.cap = "True probability of success in orange, observed sample proportions in grey."}
+set.seed(05192019)
+time.pts <- 100
+n <- rep(100, time.pts)
+p <- 2
+tau2 <- .01
+beta <- matrix(0, nrow = time.pts, ncol = p)
+for(t in 2:time.pts) beta[t,] <- beta[t-1,] + rnorm(p, 0, sqrt(tau2))
+X <- matrix(c(
+  rep(1, time.pts),
+  runif(time.pts * (p-1), -1, 1)
+), nrow = time.pts, ncol = p)
+
+eta <- rowSums(X * beta)
+pi <- exp(eta) / (1 + exp(eta))
+
+df <- data.frame(
+  time = 1:time.pts,
+  n = n,
+  y = rbinom(time.pts, n, pi), 
+  pi = pi
+)
+
+df <- cbind(df, X[,2:p]); names(df)[5:(3 + p)] <- paste0('x', 1:(p-1))
+save(df, file = 'df.Rdata')
+
+ggthemr::ggthemr('dust', layout = 'scientific')
+ggplot(df) +
+  geom_line(aes(x = time, y = pi)) +
+  geom_point(aes(x = time, y = y/n), col = 'grey') +
+  labs(title = "Simulated data",
+       y = expression(pi)) +
+  ylim(0, 1) +
+  theme(axis.title.y = element_text(angle = 0, vjust = .5))
+```
+
+We now implement the sampler described in Section 2.1. 
+
+```{r, cache = T, fig.dims = c(16,16), fig.cap = "Posterior mean probability in solid orange, 95% credibility intervals in dotted orange, observed sample proportions in grey."}
+load('df.Rdata')
+
+# setup sampler
+time.pts <- nrow(df)
+p <- 2
+n <- df$n
+num.mcmc <- 1000
+X <- model.matrix(~ x1, df)
+
+beta.mcmc <- array(0, dim = c(time.pts, p, num.mcmc))
+dimnames(beta.mcmc)[[2]] <- c('b0', 'b1')
+beta.mcmc[,,1] <- matrix(rnorm(p * time.pts), time.pts, p)
+beta <- beta.mcmc[,,1]
+
+tau2.mcmc <- rep(1, num.mcmc)
+tau2 <- tau2.mcmc[1]
+
+# priors
+mu0 <- matrix(0, ncol = 1, nrow = p)
+Sigma0 <- 100*diag(p)
+a0 <- b0 <- .000000001
+
+# precompute kappa
+kappa <- with(df, y - n/2)
+begin <- Sys.time()
+for(i in 2:num.mcmc){
+  # update omega
+  eta <- rowSums(X * beta)
+  omega <- BayesLogit::rpg(time.pts, n, eta)
+  z <- (1/omega)*kappa
+  
+  # update betas 
+  beta <- ffbs(y = z, X = X, mu0 = mu0, phi0 = Sigma0, tau2 = tau2, sigma2 = 1/omega)$beta
+  
+  # update tau2
+  # tau2 <- .01
+  gamma.n <- a0 + .5*time.pts
+  tau.n <- b0 + .5 * sum((eta[2:time.pts] - eta[1:(time.pts-1)])^2)
+  tau2 <- LearnBayes::rigamma(1, gamma.n, tau.n)
+  
+  # store
+  beta.mcmc[,,i] <- beta
+  tau2.mcmc[i] <- tau2
+  
+  # progress
+  if(F) my.prog(begin = begin, num.mcmc = num.mcmc, i = i)
+}
+
+pred.pi <- matrix(0, num.mcmc, time.pts)
+for(i in 1:num.mcmc){
+  eta <- rowSums(X * beta.mcmc[,,i])
+  pred.pi[i,] <- exp(eta) / (1 + exp(eta))
+}
+df$pi.est <- colMeans(pred.pi)
+df$pi.lwr <- apply(pred.pi, 2, quantile, probs = 0.025)
+df$pi.upr <- apply(pred.pi, 2, quantile, probs = 0.975)
+
+ggthemr::ggthemr('dust', layout = 'scientific')
+wrapper <- function(x, ...) {
+  paste(strwrap(x, ...), collapse = "\n")
+}
+ggplot(df) +
+  geom_point(aes(x = time, y = y/n), col = 'grey', pch = 16) +
+  geom_line(aes(x = time, y = pi.est)) +
+  geom_line(aes(x = time, y = pi.lwr), linetype = 'dotdash') +
+  geom_line(aes(x = time, y = pi.upr), linetype = 'dotdash') +
+  labs(title = 'Posterior predictive summary',
+       y = expression(hat(pi))) +
+  ylim(0,1) +
+  theme(axis.title.y = element_text(angle = 0, vjust = .5))
+```
+
+\newpage
+\doublespacing
+
+\subsubsection{2.2.2 Multiple observations per time point}
+
+We now consider the case with multiple binomial trials per time point.
+
+\singlespacing
+
+```{r, cache = T, fig.cap = 'True probability in orange, observed sample proportions in grey.'}
+set.seed(05192019)
+time.pts <- 100
+n <- rep(100, time.pts)
+p <- 2
+tau2 <- .01
+beta <- matrix(0, nrow = time.pts, ncol = p)
+for(t in 2:time.pts) beta[t,] <- beta[t-1,] + rnorm(p, 0, sqrt(tau2))
+X <- matrix(c(
+  rep(1, time.pts),
+  runif(time.pts * (p-1), -1, 1)
+), nrow = time.pts, ncol = p)
+
+eta <- rowSums(X * beta)
+pi <- rep(exp(eta) / (1 + exp(eta)), each = 10)
+
+df <- data.frame(
+  time = rep(1:time.pts, each = 10),
+  n = rep(n, each = 10),
+  y = rbinom(time.pts*10, rep(n, each = 10), pi), 
+  pi = pi
+)
+
+df <- cbind(df, X[,2:p]); names(df)[5:(3 + p)] <- paste0('x', 1:(p-1))
+save(df, file = 'df.Rdata')
+
+ggthemr::ggthemr('dust', layout = 'scientific')
+ggplot(df) +
+  geom_point(aes(x = time, y = y/n), col = 'grey') +
+  geom_line(aes(x = time, y = pi)) +
+  labs(title = "Simulated data",
+       y = expression(pi)) +
+  ylim(0, 1) +
+  theme(axis.title.y = element_text(angle = 0, vjust = .5))
+```
+
+```{r, cache = T, eval = F, echo = F}
+load('df.Rdata')
+
+# setup sampler
+time.pts <- nrow(df)
+p <- 2
+n <- df$n
+num.mcmc <- 1000
+X <- model.matrix(~ x1, df)
+
+beta.mcmc <- array(0, dim = c(time.pts, p, num.mcmc))
+dimnames(beta.mcmc)[[2]] <- c('b0', 'b1')
+beta.mcmc[,,1] <- matrix(rnorm(p * time.pts), time.pts, p)
+beta <- beta.mcmc[,,1]
+
+tau2.mcmc <- rep(1, num.mcmc)
+tau2 <- tau2.mcmc[1]
+
+# priors
+mu0 <- matrix(0, ncol = 1, nrow = p)
+Sigma0 <- 100*diag(p)
+a0 <- b0 <- .000000001
+
+# precompute kappa
+kappa <- with(df, y - n/2)
+begin <- Sys.time()
+for(i in 2:num.mcmc){
+  # update omega
+  eta <- rowSums(X * beta)
+  omega <- BayesLogit::rpg(time.pts, n, eta)
+  z <- (1/omega)*kappa
+  
+  # update betas 
+  beta <- ffbs(y = z, X = X, mu0 = mu0, phi0 = Sigma0, tau2 = tau2, sigma2 = 1/omega)$beta
+  
+  # update tau2
+  # tau2 <- .01
+  gamma.n <- a0 + .5*time.pts
+  tau.n <- b0 + .5 * sum((eta[2:time.pts] - eta[1:(time.pts-1)])^2)
+  tau2 <- LearnBayes::rigamma(1, gamma.n, tau.n)
+  
+  # store
+  beta.mcmc[,,i] <- beta
+  tau2.mcmc[i] <- tau2
+  
+  # progress
+  if(F) my.prog(begin = begin, num.mcmc = num.mcmc, i = i)
+}
+
+pred.pi <- matrix(0, num.mcmc, time.pts)
+for(i in 1:num.mcmc){
+  eta <- rowSums(X * beta.mcmc[,,i])
+  pred.pi[i,] <- exp(eta) / (1 + exp(eta))
+}
+df$pi.est <- colMeans(pred.pi)
+df$pi.lwr <- apply(pred.pi, 2, quantile, probs = 0.025)
+df$pi.upr <- apply(pred.pi, 2, quantile, probs = 0.975)
+
+ggthemr::ggthemr('dust', layout = 'scientific')
+wrapper <- function(x, ...) {
+  paste(strwrap(x, ...), collapse = "\n")
+}
+ggplot(df) +
+  geom_point(aes(x = time, y = y/n), col = 'grey', pch = 16) +
+  geom_line(aes(x = time, y = pi.est)) +
+  geom_line(aes(x = time, y = pi.lwr), linetype = 'dotdash') +
+  geom_line(aes(x = time, y = pi.upr), linetype = 'dotdash') +
+  labs(title = 'Posterior predictive summary',
+       y = expression(hat(pi))) +
+  ylim(0,1) +
+  theme(axis.title.y = element_text(angle = 0, vjust = .5))
+```
+
+\newpage
+\doublespacing
+\section{3 Multinomial Regression}
+
+We now extend the standard logistic regression model to the multinomial case using the multinomial logit (softmax) link function. 
+\[
+\begin{split}
+\boldsymbol{y}_{i} | \boldsymbol{\pi}_{i} &\sim \text{multinomial}\left(1, \boldsymbol{\pi}_{i}\right) \\
+\pi_{ij} &= \frac{\text{exp}(\bfx_i'\bfb_{j})}{\sum_{k=1}^J \text{exp}(\bfx_i'\bfb_k)} 
+\end{split}
+\]
+
+where $\boldsymbol{y}_i$ represents the vector of responses for the multinomial trial on observation $i$ and $\boldsymbol{\pi}_i$ represents the vector of probabilities of success for each level of the multinomial trial, and $\pi_{ij}$ represents the probability of success for level $j$ on trial $i$. 
+
+\subsection{3.1 Derivations}
+
+To sample the joint posterior distribution of $\bfb$, we again make use of the Polya-gamma data augmentation strategy described by [@polson2013]. To do so, we require the likelihood contribution of the regression coefficients associated with one level of the response conditional on the others. [@holmes2006] showed that this contribution is given by the following:
+\[
+\begin{split}
+\ell(\bfb_j | \bfb_{-j}, \bfy) \propto \prod_{i=1}^N \left(\frac{e^{\eta_{ij}}}{1+e^{\eta_{ij}}}\right)^{y_{ij}} \left(\frac{1}{1+e^{\eta_{ij}}}\right)^{n_i - y_{ij}} = \prod_{i=1}^N \frac{\left(e^{\eta_{ij}}\right)^{y_{ij}}}{\left(1+e^{\eta_{ij}}\right)^{n_i}}
+\end{split}
+\]
+where $\eta_{ij} = \bfx_i'\bfb_j - c_{ij}$ and $c_{ij} = \text{log}\left(\sum_{k \neq j} \text{exp}(\bfx_i'\bfb_k) \right)$. Thus, it is clear that conditional on the regression coefficients associated with the other levels of the response, the likelihood contribution of $\bfb_j$ has the same form as that of the standard logistic regression model. Therefore, we can replicate the samplers described above, looping over $J - 1$ (for identifiability) levels of the response. 
+
+If we let $z_{ij} = \frac{1}{\omega_{ij}}(y_{ij} - \frac{n_{i}}{2})$, then $z_{ij} | \bfb, \omega_{ij} \sim N(\eta_{ij}, \frac{1}{\omega_{ij}})$. We now derive the full conditional posterior distribution of $\bfb_j$, again assuming a $\mathcal{N}(\bfmu_0, \bfS_0)$ prior on $\bfb_j$.
+\begin{equation*}
+\begin{split}
+p(\bfb_j | \bfz, \bfW_j) &\propto p(\bfz | \bfb_j, \bfW_j) \cdot p(\bfb_j) \\
+&\propto \exp\left\{-\frac{1}{2}\left(\bfz_j - (\bfX\bfb_j - \bfc_j) \right)' \bfW_j \left(\bfz_j - (\bfX\bfb_j - \bfc_j) \right) \right\} \exp\left\{-\frac{1}{2}\left(\bfb_j - \bfmu_0 \right)' \bfS_0^{-1} \left(\bfb_j - \bfmu_0 \right) \right\} \\
+&\propto \text{exp}\left\{-\frac{1}{2}\left(- 2\bfb_j'\bfX'\bfW_j\bfz_j - 2\bfb_j'\bfX'\bfW_j\bfc_j + \bfb_j'\bfX'\bfW_j\bfX\bfb_j \right) \right\} \text{exp}\left\{-\frac{1}{2}\left(\bfb_j'\bfS_0^{-1}\bfb_j - 2\bfb_j'\bfS_0^{-1}\bfmu_0 \right) \right\} \\
+&= \text{exp}\left\{-\frac{1}{2}\left(- 2\bfb_j'\bfX'\bfW_j(\bfz_j + \bfc_j) + \bfb_j'\bfX'\bfW_j\bfX\bfb_j \right) \right\} \text{exp}\left\{-\frac{1}{2}\left(\bfb_j'\bfS_0^{-1}\bfb_j - 2\bfb_j'\bfS_0^{-1}\bfmu_0 \right) \right\} \\
+&= \text{exp}\left\{-\frac{1}{2}\left(- 2\bfb_j'\left(\bfX'\bfW_j(\bfz_j + \bfc_j) + \bfS_0^{-1}\bfmu_0 \right) + \bfb_j'\left(\bfX'\bfW_j\bfX + \bfS_0^{-1}\right) \bfb_j\right) \right\} \\
+\end{split}
+\end{equation*}
+
+Consequently, we have the following full conditional posterior distributions:
+\[
+\begin{split}
+\bfb_j | \bfb_{-j}, \bfz_j, \bfW_j &\sim \mathcal{N}(\bfm_j, \bfV_j) \\
+\omega_{ij} | \bfb, \bfZ &\sim \text{PG}(n_{i}, \eta_{ij})
+\end{split}
+\]
+where $\bfV_j = \left(\bfX'\bfW_j\bfX + \bfS_0^{-1}\right)^{-1}$, $\bfm = \bfV(\bfX'(\boldsymbol{\kappa_j + \bfW_j\boldsymbol{c}_j}) + \bfS_0^{-1}\bfmu_0)$, $\eta_{ij} = \bfx_i'\bfb_j - c_{ij}$, and $c_{ij} = \text{log}\left(\sum_{k \neq j} \text{exp}(\bfx_i'\bfb_k) \right)$.
+
+\subsection{3.2 Implementation}
+
+We first generate some multinomial data. 
+
+\singlespacing
+```{r, cache = T, warning = F, fig.cap = 'Simulated data. Each color represents a level of the response. The line represents the true probability, the points represent the observed proportions out of a multinomial trial with a size of 100.'}
+N <- 100
+num.trials <- 100
+J <- 3
+beta <- rbind(
+  c(0, -2),
+  c(0, 2),
+  c(0, 0)
+)
+X <- cbind(
+  rep(1, N),
+  runif(N, -1, 1)
+)
+
+linpred <- X %*% t(beta)
+pi <- exp(linpred) / rowSums(exp(linpred))
+y <- matrix(0, N, J)
+for(i in 1:N){
+  y[i,] <- c(rmultinom(1, num.trials, pi[i,]))
+}
+df <- data.frame(cbind(
+  X[,2],
+  y,
+  rep(num.trials, N)
+))
+names(df) <- c('x', 'group1', 'group2', 'group3', 'n')
+
+ggthemr::ggthemr('dust', layout = 'scientific')
+df %>% gather(group, count, group1:group3) %>% cbind(., pi = c(pi)) %>%
+  ggplot() +
+  geom_line(aes(x = x, y = pi, col = group)) + 
+  geom_point(aes(x = x, y = count / n, col = group)) +
+  labs(title = 'Simulated data',
+       y = expression(pi)) +
+  ylim(0, 1) + 
+  theme(axis.title.y = element_text(angle = 0, vjust = .5))
+```
+
+\newpage
+
+```{r, eval = T}
+# response, size, and design
+size <- rep(num.trials, N)
+X <- model.matrix( ~ x, df)
+J <- ncol(y)
+
+# precompute kappa
+kappa <- y - size/2 
+
+# setup sampler and priors
+num.mcmc <- 1000
+p <- ncol(X)
+beta.mcmc <- array(0, dim = c(num.mcmc, p, J))
+dimnames(beta.mcmc)[[2]] <- colnames(X)
+dimnames(beta.mcmc)[[3]] <- c(paste0('y', 1:3))
+
+mu0 <- matrix(0, nrow = p, ncol = 1)
+Sigma0.inv <- solve(9*diag(p))
+prior.prod <- Sigma0.inv %*% mu0
+
+# initialize
+beta.mcmc[1,,] <- matrix(rnorm(p*J), ncol = 1)
+
+# sampler
+for(i in 2:num.mcmc){
+  for(j in 1:(J-1)){
+    # calculate matrix of linear predictors
+    linpred <- X %*% beta.mcmc[i-1,,]
+    
+    # update latent omegas
+    C <- log(rowSums(exp(linpred[,-j])))
+    eta <- linpred[,j] - C
+    omega <- BayesLogit::rpg(N, size, eta)
+    Omega <- diag(omega)
+    
+    # update beta
+    V <- solve(t(X) %*% Omega %*% X + Sigma0.inv)
+    m <- V %*% (t(X) %*% (kappa[,j] + Omega %*% C) + prior.prod)
+    beta.mcmc[i,,j] <- matrix(mvtnorm::rmvnorm(1, m, V), ncol = 1)
+  }
+}
+colMeans(beta.mcmc)
+```
+
+\doublespacing
+
+These estimates are consistent with the parameters that generated the data. 
+
+\newpage
+
+\section{4 Dynamic multinomial regression}
+
+We now allow the regression coefficients to change over time, as we did in the logistic case. 
+\[
+\begin{split}
+\bfy_t &\sim \text{multinomial}(n_t, \boldsymbol{\pi}_t), \hspace{5mm} \boldsymbol{\pi}_t = \frac{\exp(\bfx_t'\bfb_{t,j})}{\sum_{k=1}^J\exp(\bfx_t'\bfb_{t,k})} \\
+\bfb_{t,j} &= \bfb_{t-1,j} + \bfV_{t,j}, \hspace{12mm} \bfV_{t,j} \sim \mathcal{N}(\boldsymbol{0}, \tau_j^2\boldsymbol{I})
+\end{split}
+\]
+
+\subsection{4.1 Derivations}
+
+Recall from Section 3.1 that if we let  $z_{t,j} = \frac{1}{\omega_{t,j}}(y_{t,j} - \frac{n_{t}}{2})$, then $z_{t,j} | \bfb_{t,j}, \omega_{t,j} \sim N(\eta_{t,j}, \frac{1}{\omega_{t,j}})$, where $\eta_{t,j} = \bfx_t'\bfb_{t,j} - c_{t,j}$ and $c_{t,j} = \text{log}\left(\sum_{k \neq j} \text{exp}(\bfx_t'\bfb_{t,k}) \right)$. Therefore, to sample from the joint posterior distribution of $\bfb_{1:T,j}$ and $\omega_{t,j}$, we implement a FFBS algorithm treating $z_{t,j}$ as working responses, as we did in the logistic case. Our observation and evolution equations are as follows:
+\[
+\begin{split}
+z_{t,j} &= x_t'\bfb_{t,j} - c_{t,j} + w_{t,j}, \hspace{8mm} w_{t,j} \sim N\left(0, \frac{1}{\omega_{t,j}}\right) \\
+\bfb_{t,j} &= \bfb_{t-1,j} + \bfV_{t,j}, \hspace{5mm} \bfV_{t,j} \sim \mathcal{N}(\boldsymbol{0}, \tau_j^2\boldsymbol{I})
+\end{split}
+\]
+
+\begin{mdframed}
+To take fully Bayesian draws from the joint posterior distribution, we implement the following Gibbs sampler, looping over $J-1$ categories:
+\begin{itemize}
+\item[1)] sample $\bfb_{1:T, j} | \cdot$ using a FFBS
+\item[2)] sample $\omega_{t,j} | \cdot \sim \text{PG}(n_t, \eta_{t,j})$
+\item[3)] sample $\tau_j | \cdot \sim \text{IG}(a_0 + \frac{T}{2}, b_0 + \frac{1}{2} \sum_{t=1}^T (\eta_{t,j} - \eta_{t-1, j})^2)$
+\end{itemize}
+\end{mdframed}
+
+\subsection{4.2 Implementation}
+
+Again, we begin by generating dynamic multinomial regression data. 
+
+\subsubsection{4.2.1 One observation per time point}
+
+We begin by consider a single multinomial trial per time point. 
+
+\singlespacing
+```{r, cache = T, fig.cap = "True probability given by the line, sample proportions of success with size of 500 given by points."}
+set.seed(05232019)
+time.pts <- 100
+size <- rep(500, time.pts)
+p <- 2
+J <- 3
+X <- cbind(
+  rep(1, time.pts),
+  runif(time.pts, -2, 2)
+)
+
+# generate dynamic data
+beta <- array(0, dim = c(time.pts, p, J))
+tau2 <- .01
+for(t in 2:time.pts){
+  for(j in 1:(J-1)){
+    beta[t,, j] <- beta[t-1,, j] + rnorm(p, 0, sd = sqrt(tau2))
+  }
+}
+linpred <- apply(beta * array(rep(X, J), dim = c(time.pts, p, J)), 3, rowSums)
+pi <- exp(linpred) / (rowSums(exp(linpred)))
+y.mat <- matrix(0, time.pts, J)
+for(t in 1:time.pts){
+  y.mat[t, ] <- rmultinom(1, size = size[t], prob = pi[t,])
+}
+
+# plot
+ggthemr::ggthemr('dust', layout = 'scientific')
+tibble(
+  time = rep(1:time.pts, J),
+  x = rep(X[,2], J),
+  size = rep(size, J),
+  y = c(y.mat),
+  group = rep(c('a', 'b', 'c'), each = time.pts),
+  pi = c(pi)
+) %>%
+  ggplot() +
+  geom_line(aes(x = time, y = pi, col = group)) +
+  geom_point(aes(x = time, y = y /size, col = group)) +
+  ylim(0, 1) +
+  labs(title = 'Simulated data',
+       y = expression(pi)) +
+  theme(axis.title.y = element_text(angle = 0, vjust = .5))
+```
+
+\newpage
+
+```{r, cache = T}
+# setup sampler - need: n, p, X, y, time.pts, J
+num.mcmc <- 1000
+n <- size
+
+beta.mcmc <- list()
+for(j in 1:(J-1)){
+  beta.mcmc[[j]] <- array(0, dim = c(time.pts, p, num.mcmc))
+  dimnames(beta.mcmc[[j]])[[2]] <- c('b0', 'b1')
+  beta.mcmc[[j]][,,1] <- matrix(rnorm(p * time.pts), time.pts, p)
+}
+
+tau2.mcmc <- matrix(1, num.mcmc, J)
+tau2 <- tau2.mcmc[1,1]
+
+# priors
+mu0 <- matrix(0, ncol = 1, nrow = p)
+Sigma0 <- 100*diag(p)
+a0 <- b0 <- .000000001
+
+# precompute kappa
+kappa <- y.mat - n/2
+begin <- Sys.time()
+
+# sample
+for(i in 2:num.mcmc){
+  for(j in 1:(J-1)){
+    # organize 
+    beta <- beta.mcmc[[j]][,,i-1]
+    y <- y.mat[,j]
+
+    # update omega - inefficient, could speed up
+    linpred <- matrix(0, time.pts, J)
+    for(k in 1:(J-1)){
+      linpred[,k] <- rowSums(X * beta.mcmc[[k]][,,i-1])
+    }
+    C <- log(rowSums(exp(linpred[,-j])))
+    eta <- linpred[,j] - C
+    omega <- BayesLogit::rpg(time.pts, n, eta)
+    z <- (1/omega)*kappa[,j]
+    z.star <- z + C
+    
+    # update betas
+    beta <- ffbs(y = z.star, X = X, mu0 = mu0, phi0 = Sigma0, tau2 = tau2, sigma2 = 1/omega)$beta
+    
+    # update tau2
+    # gamma.n <- a0 + .5*time.pts
+    # tau.n <- b0 + .5 * sum((eta[2:time.pts] - eta[1:(time.pts-1)])^2)
+    # tau2 <- LearnBayes::rigamma(1, gamma.n, tau.n)
+    tau2 <- .01
+    
+    # store results
+    beta.mcmc[[j]][,,i] <- beta
+    tau2.mcmc[i,j] <- tau2
+  }
+  
+  # print progress
+  if(F) my.prog(begin = begin, num.mcmc = num.mcmc, i = i)
+}
+
+pi.est <- array(0, dim = c(time.pts, J, num.mcmc))
+eta.est <- array(0, dim = c(time.pts, J, num.mcmc))
+for(j in 1:(J-1)){
+  eta.est[,j,] <- t(apply(beta.mcmc[[j]], 3, FUN = function(x) rowSums(x * X)))
+}
+
+for(i in 1:num.mcmc){
+  tmp <- exp(eta.est[,,i])
+  pi.est[,,i] <- tmp / rowSums(tmp)
+}
+
+# estimates
+apply(pi.est, c(1,2), mean)
+
+```
+
+
+\newpage
+\singlespacing
+\section{Appendix S1: R Functions}
+
+Any functions not explicitly defined in the document above are defined here. 
+
+```{r, tidy = T}
+ffbs <- function(y, X, mu0, phi0, tau2, sigma2){
+  # setup storage
+  y <- matrix(y, ncol = 1)
+  time.pts <- nrow(y)
+  p <- ncol(X)
+  beta <- matrix(0, time.pts, p)
+  m.mcmc <- matrix(0, time.pts, p)
+  C.mcmc <- matrix(0, time.pts, p^2)
+
+  if(length(sigma2) == 1) sigma2 <- rep(sigma2, time.pts)
+
+  # forward filter
+  m.t <- matrix(mu0, time.pts, p)
+  C.t <- matrix(0, time.pts, p^2);C.t[1,] <- c(phi0*diag(p))
+  a.t <- matrix(0, time.pts, p)
+  R.t <- matrix(0, time.pts, p^2)
+  # G.t <- diag(p)
+
+  W.t <- tau2 * diag(p)
+  for(t in 2:time.pts){
+    F.t <- t(X[t,])
+
+    Cmat.t <- matrix(C.t[t-1,], p, p)
+
+    # a.t[t,] <- G.t %*% m.t[t-1, ]
+    a.t[t,] <- m.t[t-1, ]
+    # R.t[t,] <- c(G.t %*% Cmat.t %*% t(G.t) + W.t)
+    R.t[t,] <- c(Cmat.t + W.t)
+
+    Rmat.t <- matrix(R.t[t,], p, p)
+
+    f.t <- F.t %*% a.t[t,]
+    Q.t <- F.t %*% Rmat.t %*% t(F.t) + sigma2[t]
+
+    Qinv.t <- solve(Q.t)
+
+    m.t[t,] <- a.t[t,] + Rmat.t %*% t(F.t) %*% Qinv.t %*% (y[t,] - f.t)
+    C.t[t,] <- c(Rmat.t - Rmat.t %*% t(F.t) %*% Qinv.t %*% F.t %*% Rmat.t)
+    m.mcmc[t,] <- m.t[t,]
+    C.mcmc[t,] <- C.t[t,]
+  }
+
+  # backwards sample
+  beta[time.pts,] <- mvtnorm::rmvnorm(1, m.t[time.pts,], sigma = matrix(C.t[time.pts,], p, p))
+  for(t in 1:(time.pts - 1)){
+    ndx <- time.pts - t
+    h.t <- m.t[ndx, ] + matrix(C.t[ndx,], p, p) %*% solve(matrix(R.t[ndx+1,], p, p)) %*% (beta[ndx+1,] - a.t[ndx+1,])
+    H.t <- matrix(C.t[ndx,], p, p) - matrix(C.t[ndx,], p, p) %*% solve(matrix(R.t[ndx+1,], p, p)) %*% matrix(C.t[ndx,], p, p)
+    beta[ndx,] <- mvtnorm::rmvnorm(1, h.t, sigma = round(H.t, 5))
+  }
+
+  out <- list(beta = beta, m = m.mcmc, C = C.mcmc)
+  return(out)
+}
+
+```
+
+```{r, tidy = F}
+my.prog <- function(print = .05*num.mcmc, begin, num.mcmc, i){
+  if(i %% print == 0){
+    cat("\014")
+    runtime <- (Sys.time() - begin)
+    percent <- round(i/num.mcmc * 100, 2)
+    message <- paste('\nIteration ', i, ' of ', num.mcmc, '; ', percent, '% done. Current runtime of ', round(runtime, 2), ' ', attr(runtime, 'units'), '.\n', sep = "")
+    cat(message)
+    txtProgressBar(min = 2, max = num.mcmc, initial = i, style = 3)
+  }
+}
+```
+
+\newpage
+\singlespacing
+\section{References}
+\setlength{\parindent}{-0.2in}
+\setlength{\leftskip}{0.2in}
+\setlength{\parskip}{8pt}
+
+\noindent \bibliography{biblio}

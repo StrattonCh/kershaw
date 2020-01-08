@@ -1,0 +1,13 @@
+base
+magrittr
+bayes
+ggplot2
+ggthemr
+tidyverse
+tibble
+tidyr
+readr
+purrr
+dplyr
+stringr
+forcats
