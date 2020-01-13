@@ -1,0 +1,38 @@
+\documentclass[12pt]{article}
+\usepackage{lineno}
+\usepackage{natbib}
+\usepackage{setspace} 
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage[margin=1in]{geometry}
+\usepackage[]{algorithm2e}
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+\newcommand\Andy[1]{ \textcolor{red}{ #1}}
+
+\title{\bf Pitch Prediction: Statistical Learning}
+ \author{
+  Christian Stratton, Andrew Hoegh, Jennifer Green\\
+    Montana State University\\
+  Department of Mathematical Sciences}
+        
+\maketitle
+
+\bigskip
+\begin{abstract}
+\noindent 
+\end{abstract}
+{\it Keywords: } 
+\doublespacing
+\newpage
+
+\linenumbers
+
+\section{Introduction}
+Manuscript skeleton
+%\bibliographystyle{apalike}
+
+%\bibliography{Grizzly}
+
+\end{document}
