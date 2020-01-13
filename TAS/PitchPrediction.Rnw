@@ -30,7 +30,7 @@
 \linenumbers
 
 \section{Introduction}
-Manuscript skeleton
+Manuscript skeleton, testing GitHub linking.
 %\bibliographystyle{apalike}
 
 %\bibliography{Grizzly}
