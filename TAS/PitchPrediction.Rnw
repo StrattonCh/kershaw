@@ -28,15 +28,17 @@
 \linenumbers
 
 \section{Introduction}
-Analytics, or more specifically sabremetrics, have long played a role in strategical choices in Major League Baseball (MLB). From a hitter's perspective, sabremetrics tools to determine the type of pitch that will be thrown would be a major advantage. While we are not aware of publicly available, and perhaps more importantly, legal methods for predicting pitch sequencing; in recent years, teams have used illegal methods to video record, decipher pitch signals, and relay them to hitters. This manuscript explores the use of statistical modeling to predict the type of pitch thrown in various scenarios.   
+Analytics, or more specifically sabermetrics, have long played a role in strategical choices in Major League Baseball (MLB). Most famously chronicled in the book Moneyball \cite{lewis2004}, sabermetrics were used to construct a roster of players primarily using On Base Percentage (OBP) rather than traditional statistics such as batting average. While baseball organizations tend to keep the most useful sabermetrics techniques proprietary, there are books \citep{baumer2014, law2017} and entire conferences denoted to applying statistical techniques to the game of baseball. \cite{koseler2017}, and the reference therein, provide an overview of many statistical and machine learning based approaches for analyzing baseball data.
+
+From a hitter's perspective, sabermetrics tools to determine the type of pitch that will be thrown would be a major advantage. While we are not aware of publicly available, and perhaps more importantly, legal methods for predicting pitch sequencing; in recent years, teams have used illegal methods to video record, decipher pitch signals, and relay them to hitters. This manuscript explores the use of statistical modeling to predict the type of pitch thrown in various scenarios.   
 
 In baseball, the catcher signals for a certain type of pitch by using a serious of hand signals. The signals are typically only seen by the pitcher and pitcher's team, unless a runner is on base. The signals determine the type of pitch that the pitcher will throw on the next pitch.
 
 Baseball is a game with many "unwritten rules", one of which would be stealing signs. Sign stealing is an accepted part of the game; however, using electronic equipment to steal signs is not permitted.
 
-In 2017, the Boston Red Sox were caught using electronic devices (apple watch), to send signals from the video replay room to the dugout. The defining feature of the verdict was the use of an electronic device. The Yankees were also accused of using the Yankees network to gain a competitive advantage.
+In 2017, the Boston Red Sox were caught using electronic devices, an Apple watch, to send signals from the video replay room to the dugout. The defining feature of the verdict was the use of an electronic device. The New York Yankees were also accused of using the Yankees network to gain a competitive advantage.
 
-On January 13, 2020 MLB imposed one of the largest penalties in history on the Houston Astros for a scandal that involved video recording hitters to steal pitch signs and then relaying signals by banging on trash cans. The Astros were fined 5 million dollars, the maximum fine allowed in MLB; stripped of first and second round draft picks for multiple years; and the manager and general manager (GM) were suspended for one year. The manager and GM were ultimately fired by the organization. The Boston Red Sox and manager, Alex Cora - a former Houston Astro are still under investigation.
+On January 13, 2020 MLB imposed one of the largest penalties in history on the Houston Astros for a scandal that involved video recording hitters to steal pitch signs and then relaying signals by banging on trash cans. The Astros were fined 5 million dollars, the maximum fine allowed in MLB; stripped of first and second round draft picks for multiple years; and the manager and general manager (GM) were suspended for one year. The manager and GM were ultimately fired by the organization. The Boston Red Sox manager, Alex Cora, and the New York Mets manager, Carlos Beltran, both former Houston Astros employees were also fired by their respective organizations in wake of the  - a former Houston Astro are still under investigation.
 
 
 In recent years, MLB changed the rules to permit the use of technology in the dugout as teams are now allowed to use league-provided iPad/laptops.
@@ -44,7 +46,7 @@ In recent years, MLB changed the rules to permit the use of technology in the du
 In line with historical advances in analytics in baseball and the sabremetrics movement, we seek to explore using statistical models to predict the next pitch thrown depending on the count and other scenarios. To be clear, the goal is not to use electronic equipment to decode signs, but rather statistical learning tools are used to decipher patterns in pitch sequencing. Section 2 describes the data used in this analysis. Section 3 highlights the statistical models used for prediction as well as the loss functions used to evaluate different models. Section 4 describes the model results and Section 5 concludes with a discussion. 
 
 \section{Data}
-The data used for this analysis come from Pitch Fx and specifically the Pitch Rx package (ADD CITE) is used to scrape data into R. The Pitch Fx data is captured by a camera and contains several variables about each pitch, one of which is the pitch type. 
+The data used for this analysis come from Pitch Fx and specifically the Pitch Rx package \cite{sievert2014} is used to scrape data into R. The Pitch Fx data is captured by a camera and contains several variables about each pitch, one of which is the pitch type. 
 
 \section{Statistical Framework}
 
@@ -52,12 +54,18 @@ The data used for this analysis come from Pitch Fx and specifically the Pitch Rx
 
 \subsection{Model Specification}
 
+\subsubsection{Polya-Gamma Hierarchical Logistic Regression}
+
+\subsubsection{Bayesian - CART}
+
+\subsubsection{BART}
+
 \section{Results}
 
 \section{Discussion}
 
-%\bibliographystyle{apalike}
+\bibliographystyle{apalike}
 
-%\bibliography{Grizzly}
+\bibliography{baseball_refs}
 
 \end{document}
